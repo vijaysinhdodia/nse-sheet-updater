@@ -3,12 +3,9 @@ import requests
 import pandas as pd
 import gspread
 
-# Primary and Fallback URLs
+# Exact URLs for Mainboard and SME equities
 NSE_MAIN_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-SME_URLS = [
-    "https://nsearchives.nseindia.com/content/equities/SME_EQUITY_L.csv",
-    "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
-]
+NSE_SME_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
 
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -20,66 +17,66 @@ headers = {
 session = requests.Session()
 session.headers.update(headers)
 
-# Initialize NSE session cookies
+# 1. Establish session cookies with NSE main site to prevent 403 blocks
 try:
+    print("Establishing session with NSE...")
     session.get("https://www.nseindia.com", timeout=10)
 except Exception as e:
-    print(f"Session initialization warning: {e}")
+    print(f"Warning during session setup: {e}")
 
-def fetch_csv(url):
-    """Helper function to fetch and validate CSV data from NSE."""
+def fetch_nse_csv(url, category_name):
+    print(f"Downloading {category_name} list from: {url}")
     try:
-        response = session.get(url, timeout=15)
-        # Verify HTTP status and check that content is CSV, not HTML error page
-        if response.status_code == 200 and not response.text.strip().startswith("<"):
-            df = pd.read_csv(io.StringIO(response.text)).fillna('')
+        res = session.get(url, timeout=15)
+        
+        # Verify status and make sure response is CSV, not an HTML block page
+        if res.status_code == 200 and not res.text.strip().startswith("<"):
+            df = pd.read_csv(io.StringIO(res.text)).fillna('')
+            # Clean spaces from column names and capitalize
             df.columns = df.columns.str.strip().str.upper()
+            df['CATEGORY'] = category_name
+            print(f"Successfully loaded {len(df)} {category_name} stocks.")
             return df
         else:
-            print(f"Failed or invalid response from {url} (Status: {response.status_code})")
-            return None
+            print(f"Failed to fetch {category_name}. Status: {res.status_code}")
+            return pd.DataFrame()
     except Exception as err:
-        print(f"Error fetching {url}: {err}")
-        return None
+        print(f"Error fetching {category_name}: {err}")
+        return pd.DataFrame()
 
-# 1. Fetch Mainboard Equities
-print("Downloading Mainboard stock list...")
-df_main = fetch_csv(NSE_MAIN_URL)
-if df_main is None or df_main.empty:
-    raise RuntimeError("Failed to fetch Mainboard stock list from NSE.")
+# Download Mainboard and SME data
+df_main = fetch_nse_csv(NSE_MAIN_URL, 'Mainboard')
+df_sme = fetch_nse_csv(NSE_SME_URL, 'SME')
 
-df_main['CATEGORY'] = 'Mainboard'
+# Filter out empty dataframes
+valid_frames = [df for df in [df_main, df_sme] if not df.empty]
 
-# 2. Fetch SME Equities (with fallback URL attempt)
-print("Downloading SME stock list...")
-df_sme = None
-for sme_url in SME_URLS:
-    df_sme = fetch_csv(sme_url)
-    if df_sme is not None and not df_sme.empty:
-        print(f"Successfully fetched SME stocks from: {sme_url}")
-        break
+if not valid_frames:
+    raise RuntimeError("Failed to download both Mainboard and SME data from NSE.")
 
-if df_sme is not None and not df_sme.empty:
-    df_sme['CATEGORY'] = 'SME'
-    # Align columns smoothly
-    df_combined = pd.concat([df_main, df_sme], ignore_index=True)
-else:
-    print("Warning: Could not retrieve SME stocks. Proceeding with Mainboard stocks only.")
-    df_combined = df_main
+# Combine DataFrames safely
+df_combined = pd.concat(valid_frames, ignore_index=True)
 
-# Reorder 'CATEGORY' column to the front
-cols = ['CATEGORY'] + [c for c in df_combined.columns if c != 'CATEGORY']
-df_combined = df_combined[cols]
+# Target standard column order
+target_columns = [
+    'CATEGORY', 'SYMBOL', 'NAME OF COMPANY', 'SERIES', 
+    'DATE OF LISTING', 'PAID UP VALUE', 'MARKET LOT', 
+    'ISIN NUMBER', 'FACE VALUE'
+]
 
-print(f"Total Combined Stocks: {len(df_combined)}")
+# Keep only existing target columns safely (no KeyError possible)
+final_cols = [c for c in target_columns if c in df_combined.columns]
+df_final = df_combined[final_cols].fillna('')
 
-# 3. Update Google Sheet
+print(f"Total Combined Stocks to write: {len(df_final)}")
+
+# Update Google Sheet
 gc = gspread.service_account(filename='service_account.json')
 spreadsheet = gc.open('NSE Stock Database')
 sheet = spreadsheet.sheet1
 
 sheet.clear()
-data = [df_combined.columns.values.tolist()] + df_combined.values.tolist()
+data = [df_final.columns.values.tolist()] + df_final.values.tolist()
 sheet.update(range_name='A1', values=data)
 
 print("Google Sheet updated successfully!")

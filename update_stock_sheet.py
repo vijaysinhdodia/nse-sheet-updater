@@ -17,7 +17,7 @@ headers = {
 session = requests.Session()
 session.headers.update(headers)
 
-# 1. Establish session cookies with NSE main site to prevent 403 blocks
+# Establish session cookies
 try:
     print("Establishing session with NSE...")
     session.get("https://www.nseindia.com", timeout=10)
@@ -25,15 +25,14 @@ except Exception as e:
     print(f"Warning during session setup: {e}")
 
 def fetch_nse_csv(url, category_name):
-    print(f"Downloading {category_name} list from: {url}")
+    print(f"Downloading {category_name} list...")
     try:
         res = session.get(url, timeout=15)
-        
-        # Verify status and make sure response is CSV, not an HTML block page
         if res.status_code == 200 and not res.text.strip().startswith("<"):
             df = pd.read_csv(io.StringIO(res.text)).fillna('')
-            # Clean spaces from column names and capitalize
-            df.columns = df.columns.str.strip().str.upper()
+            
+            # 1. Replace underscores with spaces and clean up header names
+            df.columns = df.columns.str.replace('_', ' ').str.strip().str.upper()
             df['CATEGORY'] = category_name
             print(f"Successfully loaded {len(df)} {category_name} stocks.")
             return df
@@ -48,27 +47,34 @@ def fetch_nse_csv(url, category_name):
 df_main = fetch_nse_csv(NSE_MAIN_URL, 'Mainboard')
 df_sme = fetch_nse_csv(NSE_SME_URL, 'SME')
 
-# Filter out empty dataframes
-valid_frames = [df for df in [df_main, df_sme] if not df.empty]
-
-if not valid_frames:
-    raise RuntimeError("Failed to download both Mainboard and SME data from NSE.")
-
-# Combine DataFrames safely
-df_combined = pd.concat(valid_frames, ignore_index=True)
-
-# Target standard column order
+# Exact target column structure (9 columns)
 target_columns = [
     'CATEGORY', 'SYMBOL', 'NAME OF COMPANY', 'SERIES', 
     'DATE OF LISTING', 'PAID UP VALUE', 'MARKET LOT', 
     'ISIN NUMBER', 'FACE VALUE'
 ]
 
-# Keep only existing target columns safely (no KeyError possible)
-final_cols = [c for c in target_columns if c in df_combined.columns]
-df_final = df_combined[final_cols].fillna('')
+# Ensure missing columns (like MARKET LOT in SME) exist in both DataFrames
+for col in target_columns:
+    if not df_main.empty and col not in df_main.columns:
+        df_main[col] = '-'
+    if not df_sme.empty and col not in df_sme.columns:
+        df_sme[col] = '-'
 
-print(f"Total Combined Stocks to write: {len(df_final)}")
+# Reorder columns to match exact target structure
+if not df_main.empty:
+    df_main = df_main[target_columns]
+if not df_sme.empty:
+    df_sme = df_sme[target_columns]
+
+# Combine DataFrames
+valid_frames = [df for df in [df_main, df_sme] if not df.empty]
+if not valid_frames:
+    raise RuntimeError("Failed to download data from NSE.")
+
+df_final = pd.concat(valid_frames, ignore_index=True).fillna('-')
+
+print(f"Total Combined Stocks: {len(df_final)}")
 
 # Update Google Sheet
 gc = gspread.service_account(filename='service_account.json')
